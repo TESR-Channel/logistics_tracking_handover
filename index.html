@@ -473,7 +473,8 @@ code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;back
             <label><input type="radio" name="mode" value="demo"><div><b>Demo mode</b><span>จำลองการบันทึก สร้างลิงก์ตัวอย่าง (ไม่ต้องตั้งค่า)</span></div></label>
             <label><input type="radio" name="mode" value="live"><div><b>Live — Google Apps Script</b><span>ส่งไฟล์ไป Google Drive จริงผ่าน Web App URL</span></div></label>
           </div>
-          <div class="field"><label for="setEndpoint">Apps Script Web App URL</label><input class="input" id="setEndpoint" placeholder="https://script.google.com/macros/s/…/exec"><div class="help">Deploy ไฟล์ <code>tesr-drive-backend.gs</code> เป็น Web App (Execute as: Me · Access: Anyone) แล้ววาง URL ที่นี่</div></div>
+          <div class="field"><label for="setEndpoint">Apps Script Web App URL</label><input class="input" id="setEndpoint" placeholder="https://script.google.com/macros/s/…/exec"><div class="help">Deploy ไฟล์ <code>tesr-drive-backend.gs</code> เป็น Web App (Execute as: Me · Access: Anyone) แล้ววาง URL ที่นี่</div>
+            <div style="display:flex;gap:8px;align-items:center;margin-top:4px"><button class="btn btn-ghost btn-sm" id="btnTestEp">Test connection</button><span id="epStatus" style="font-size:12.5px;color:var(--muted)"></span></div></div>
           <div class="field"><label for="setFolder">Root folder ID <span>(TESR shop tracking and handover)</span></label><input class="input" id="setFolder" placeholder="1j7zETooR7NAMihHJJ2ZNOzD29-bdexXV"><div class="help">โครงสร้าง: Root → ปี (2026) → Tax ID ลูกค้า → INV00001_DDMMYYYY</div></div>
         </div>
       </div>
@@ -739,13 +740,13 @@ $('#btnSubmit').onclick=async()=>{
   $('#sumId').textContent=id; $('#sumFolder').textContent=rec.folderName; $('#sumBy').textContent=rec.createdBy; $('#sumAt').textContent=fmtDate(now);
   try{
     if(settings.mode==='live'){
-      const payload={ record:rec, parentFolderId:settings.folder||DEFAULT_SETTINGS.folder, files:[] };
+      const payload={ record:Object.assign({},rec,{files:rec.files.map(f=>({slot:f.slotTitle,name:f.name,size:f.size}))}), parentFolderId:settings.folder||DEFAULT_SETTINGS.folder, files:[] };
       const all=files.all.map(f=>({slot:f.tag||'Evidence',f})); let i=0;
       for(const {slot,f} of all){ payload.files.push({ slot, name:f.name, mime:f.type||'application/octet-stream', data:await readB64(f.file) }); setProgress(5+Math.round(45*(++i/all.length))); }
-      delete payload.record.files; payload.record.files=rec.files.map(f=>({slot:f.slotTitle,name:f.name,size:f.size}));
       setProgress(55);
       const res=await fetch(settings.endpoint,{ method:'POST', headers:{'Content-Type':'text/plain;charset=utf-8'}, body:JSON.stringify(payload) });
-      const j=await res.json(); if(!j.ok) throw new Error(j.error||'Apps Script returned an error');
+      const txt=await res.text(); let j; try{ j=JSON.parse(txt); }catch(e){ throw new Error('Web App ตอบกลับไม่ใช่ JSON (HTTP '+res.status+') — มักเกิดจาก URL ผิด หรือ Deploy ยังไม่ได้ตั้ง "Who has access: Anyone"'); }
+      if(!j.ok) throw new Error(j.error||'Apps Script returned an error');
       rec.driveUrl=j.folderUrl; rec.driveId=j.folderId||''; setProgress(95);
     } else {
       for(let p=10;p<=90;p+=16){ await new Promise(r=>setTimeout(r,180)); setProgress(p); }
@@ -869,6 +870,15 @@ function renderReports(){
 
 /* ── Settings ── */
 function loadSettingsUI(){ $$('input[name=mode]').forEach(r=>r.checked=r.value===settings.mode); $('#setEndpoint').value=settings.endpoint||''; $('#setFolder').value=settings.folder||''; $('#setUser').value=settings.user||''; $('#setPrefix').value=settings.prefix||''; $('#setMsg').value=settings.msg||''; $('#modeNote').textContent= settings.mode==='live'?'โหมด Live: ไฟล์จะถูกอัปโหลดไป Google Drive จริง':'โหมด Demo: ยังไม่เชื่อม Google Drive — ตั้งค่าได้ที่ Settings'; }
+$('#btnTestEp').onclick=async()=>{
+  const url=$('#setEndpoint').value.trim(), st=$('#epStatus'); st.style.color='var(--muted)';
+  if(!/^https:\/\/script\.google\.com\/.+\/exec$/.test(url)){ st.style.color='var(--crimson-3)'; st.textContent='URL ต้องเป็น https://script.google.com/macros/s/…/exec'; return; }
+  st.textContent='Testing…';
+  try{ const r=await fetch(url,{method:'GET',redirect:'follow'}); const t=await r.text(); let j; try{ j=JSON.parse(t);}catch(e){}
+    if(j&&j.ok){ st.style.color='var(--ok)'; st.textContent='เชื่อมต่อได้ — '+j.service+' ('+j.time.slice(0,19).replace('T',' ')+' UTC)'; }
+    else { st.style.color='var(--crimson-3)'; st.textContent='ตอบกลับไม่ใช่ JSON (HTTP '+r.status+') — ตรวจ "Who has access: Anyone" และกด New version หลังแก้โค้ด'; }
+  }catch(e){ st.style.color='var(--crimson-3)'; st.textContent='เชื่อมต่อไม่ได้: '+e.message; }
+};
 $('#btnSaveSet').onclick=async()=>{ settings={ mode:$('input[name=mode]:checked').value, endpoint:$('#setEndpoint').value.trim(), folder:$('#setFolder').value.trim(), user:$('#setUser').value.trim(), prefix:$('#setPrefix').value.trim()||'TESR-HO', msg:$('#setMsg').value }; await store.set('settings',settings); loadSettingsUI(); toast('บันทึกการตั้งค่าแล้ว'); };
 $('#btnWipe').onclick=async()=>{ if(!confirm('ลบข้อมูลรายการและลูกค้าทั้งหมดในเครื่องนี้? (ไฟล์ใน Google Drive ไม่ถูกลบ)')) return; records=[]; customers=SEED_CUSTOMERS.map(c=>Object.assign({},c)); await store.set('records',records); await saveCustomers(); updateCounts(); resetForm(); toast('ลบข้อมูลแล้ว'); };
 
