@@ -9,7 +9,7 @@ Single-file web app for TESR Shop delivery handover records, deployed on GitHub 
 ## Deploy on GitHub Pages
 1. Push this folder to a repository (files at the root).
 2. Repo → **Settings → Pages → Build and deployment**: Source = *Deploy from a branch*, Branch = `main`, Folder = `/ (root)` → Save.
-3. Open `https://<username>.github.io/<repo>/` (takes 1–2 min the first time).
+3. Open `https://tesr-channel.github.io/logistics_tracking_handover/` (takes 1–2 min the first time).
 
 ## Connect Google Drive
 1. https://script.google.com → New project → paste `tesr-drive-backend.gs`.
