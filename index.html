@@ -334,7 +334,7 @@ code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;back
         <div class="dropzone" id="dropzone">
           <svg viewBox="0 0 24 24"><path d="M12 16V8m0 0-4 4m4-4 4 4"/><path d="M20.4 17.5A5 5 0 0 0 18 8h-1.3A8 8 0 1 0 4 15.3"/></svg>
           <div><b>Drop files here</b> or <button type="button" class="linkbtn" id="btnPick">browse</button></div>
-          <div class="s">JPG, PNG, MP4, MOV, PDF · Max 50MB per file · เลือกหลายไฟล์พร้อมกันได้</div>
+          <div class="s">JPG, PNG, MP4, MOV, PDF · วิดีโอขนาดใหญ่ส่งเป็นชิ้นอัตโนมัติ · เลือกหลายไฟล์พร้อมกันได้</div>
           <div class="cam-btns">
             <button type="button" class="btn btn-dark btn-sm" id="btnPhoto"><svg viewBox="0 0 24 24"><path d="M4 8a2 2 0 0 1 2-2h2l1.5-2h5L16 6h2a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2z"/><circle cx="12" cy="13" r="3.5"/></svg>Take photo</button>
             <button type="button" class="btn btn-ghost btn-sm" id="btnVideo"><svg viewBox="0 0 24 24"><rect x="3" y="7" width="13" height="10" rx="2"/><path d="m16 11 5-3v8l-5-3z"/></svg>Record video</button>
@@ -494,7 +494,7 @@ code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;back
   </section>
   </div>
 
-  <footer class="foot"><b>TESR Co., Ltd.</b><span>|</span><span>Robot · AI · IoT · Automation · Real-world Solutions</span><span class="rule"></span><span class="motto">Engineered to Build. Deployed to Solve.</span></footer>
+  <footer class="foot"><b>TESR Co., Ltd.</b><span>|</span><span>Robot · AI · IoT · Automation · Real-world Solutions</span><span class="rule"></span><span class="motto">Engineered to Build. Deployed to Solve.</span><span id="verTag" style="font-family:var(--display);font-weight:700;color:var(--faint)"></span></footer>
 </div>
 </div>
 
@@ -518,6 +518,7 @@ code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;back
 /* ═══════════════════════════════════════════════════════════
    TESR Tracking & Handover — app logic
    ═══════════════════════════════════════════════════════════ */
+const APP_VERSION='v2.2';
 const $ = s => document.querySelector(s);
 const $$ = s => [...document.querySelectorAll(s)];
 
@@ -554,7 +555,8 @@ const SLOTS = [
 ];
 const ACCEPT = '.jpg,.jpeg,.png,.mp4,.mov,.webm,.pdf,image/jpeg,image/png,video/mp4,video/quicktime,video/webm,application/pdf';
 const IS_MOBILE = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent) || (navigator.maxTouchPoints>1 && /Macintosh/.test(navigator.userAgent));
-const MAX = 50*1024*1024;
+const MAX = 500*1024*1024;        // per-file ceiling (chunked upload → no Apps Script limit)
+const BUFFER_MAX = 80*1024*1024;  // keep files up to this size in memory (protects against iOS temp-file deletion)
 const files = { all: [] };
 let currentRecord = null;
 
@@ -601,11 +603,11 @@ function buildSlots(){
 }
 async function addFiles(list){
   for(const f of list){
-    if(f.size>MAX){ toast(`${f.name} เกิน 50MB — ข้ามไฟล์นี้`); continue; }
+    if(f.size>MAX){ toast(`${f.name} เกิน 500MB — ข้ามไฟล์นี้`); continue; }
     if(!/\.(jpe?g|png|mp4|mov|webm|pdf)$/i.test(f.name)){ toast(`${f.name} ไม่รองรับประเภทไฟล์นี้`); continue; }
-    const item={file:f,name:f.name,size:f.size,type:f.type||'',thumb:null,tag:guessTag(f),buf:null};
+    const item={file:f,name:f.name,size:f.size,type:(f.type||'').split(';')[0],thumb:null,tag:guessTag(f),buf:null};
     files.all.push(item); renderFiles();
-    try{ item.buf=await readBytes(f); if(item.buf.byteLength!==f.size) item.buf=null; }catch(e){ item.buf=null; }
+    if(f.size<=BUFFER_MAX){ try{ item.buf=await readBytes(f); if(item.buf.byteLength!==f.size) item.buf=null; }catch(e){ item.buf=null; } }
     item.thumb=await makeThumb(f); renderFiles();
   }
 }
@@ -668,8 +670,8 @@ $('#camRec').onclick=()=>{
   cam.chunks=[]; cam.rec=new MediaRecorder(cam.stream,mime?{mimeType:mime}:undefined);
   cam.rec.ondataavailable=e=>{ if(e.data.size) cam.chunks.push(e.data); };
   cam.rec.onstop=()=>{ clearInterval(cam.timer); $('#recBadge').classList.remove('on'); $('#camRec').classList.remove('rec'); $('#camRec').innerHTML='<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="6"/></svg>Start recording';
-    const type=cam.rec.mimeType||mime||'video/webm', ext=type.includes('mp4')?'mp4':'webm'; const b=new Blob(cam.chunks,{type});
-    if(b.size>MAX) return toast('วิดีโอเกิน 50MB — อัดสั้นลง');
+    const type=(cam.rec.mimeType||mime||'video/webm').split(';')[0].trim(), ext=type.includes('mp4')?'mp4':'webm'; const b=new Blob(cam.chunks,{type});
+    if(b.size>MAX) return toast('วิดีโอเกิน 500MB — อัดสั้นลง');
     addFiles([new File([b],'video_'+stamp()+'.'+ext,{type})]); toast('บันทึกวิดีโอแล้ว — เพิ่มในรายการหลักฐาน'); };
   cam.rec.start(250); cam.t0=Date.now(); $('#recBadge').classList.add('on'); $('#camRec').classList.add('rec'); $('#camRec').innerHTML='<svg viewBox="0 0 24 24"><rect x="7" y="7" width="10" height="10" rx="1"/></svg>Stop recording';
   cam.timer=setInterval(()=>{ const s=Math.floor((Date.now()-cam.t0)/1000); $('#recTime').textContent=pad2(Math.floor(s/60))+':'+pad2(s%60); },500);
@@ -923,7 +925,7 @@ $('#btnTestEp').onclick=async()=>{
   if(!/^https:\/\/script\.google\.com\/.+\/exec$/.test(url)){ st.style.color='var(--crimson-3)'; st.textContent='URL ต้องเป็น https://script.google.com/macros/s/…/exec'; return; }
   st.textContent='Testing…';
   try{ const r=await fetch(url,{method:'GET',redirect:'follow'}); const t=await r.text(); let j; try{ j=JSON.parse(t);}catch(e){}
-    if(j&&j.ok){ st.style.color='var(--ok)'; st.textContent='เชื่อมต่อได้ — '+j.service+' ('+j.time.slice(0,19).replace('T',' ')+' UTC)'; }
+    if(j&&j.ok){ st.style.color='var(--ok)'; st.textContent='เชื่อมต่อได้ — '+j.service+' · หน้าเว็บ '+APP_VERSION+(/v2/.test(j.service)?'':' ⚠ backend เป็นเวอร์ชันเก่า วางโค้ดใหม่แล้วกด New version'); }
     else { st.style.color='var(--crimson-3)'; st.textContent='ตอบกลับไม่ใช่ JSON (HTTP '+r.status+') — ตรวจ "Who has access: Anyone" และกด New version หลังแก้โค้ด'; }
   }catch(e){ st.style.color='var(--crimson-3)'; st.textContent='เชื่อมต่อไม่ได้: '+e.message; }
 };
@@ -939,6 +941,7 @@ $('#btnWipe').onclick=async()=>{ if(!confirm('ลบข้อมูลราย�
   customers=SEED_CUSTOMERS.filter(c=>!deleted.includes(c.taxId)).map(c=>Object.assign({},c,overrides[c.taxId]||{}));
   Object.values(overrides).forEach(o=>{ if(!SEED_CUSTOMERS.some(c=>c.taxId===o.taxId) && !deleted.includes(o.taxId)) customers.push(o); });
   customers.sort((a,b)=>a.company.localeCompare(b.company,'th'));
+  $('#verTag').textContent=APP_VERSION; document.title+=' '+APP_VERSION;
   updateCounts(); loadSettingsUI(); $('#invDate').value=toDMY(new Date()); updateFolderPreview();
 })();
 </script>
