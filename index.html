@@ -575,6 +575,7 @@ const ddmmyyyy = () => { const x=invDateObj(); return pad2(x.getDate())+pad2(x.g
 const folderName = () => ($('#invoice').value.trim().replace(/[\\\/:*?"<>|\s]/g,'')||'INV00001')+'_'+ddmmyyyy();
 const drivePath = () => `TESR shop tracking and handover / ${invDateObj().getFullYear()} / ${$('#taxId').value||'<TaxID>'} / ${folderName()}`;
 const totalFiles = () => files.all.length;
+const part = (f,start,end) => f.buf ? new Blob([f.buf.slice(start,end)]) : f.file.slice(start,end);
 const fillMsg = r => (settings.msg||DEFAULT_SETTINGS.msg).replace(/\{(\w+)\}/g,(_,k)=>({company:r.company,invoice:r.invoice,tracklink:r.trackLink||'-',drive:r.driveUrl||'-'})[k]??'');
 
 /* ── Navigation ── */
@@ -602,8 +603,9 @@ async function addFiles(list){
   for(const f of list){
     if(f.size>MAX){ toast(`${f.name} เกิน 50MB — ข้ามไฟล์นี้`); continue; }
     if(!/\.(jpe?g|png|mp4|mov|webm|pdf)$/i.test(f.name)){ toast(`${f.name} ไม่รองรับประเภทไฟล์นี้`); continue; }
-    const item={file:f,name:f.name,size:f.size,type:f.type||'',thumb:null,tag:guessTag(f)};
+    const item={file:f,name:f.name,size:f.size,type:f.type||'',thumb:null,tag:guessTag(f),buf:null};
     files.all.push(item); renderFiles();
+    try{ item.buf=await readBytes(f); if(item.buf.byteLength!==f.size) item.buf=null; }catch(e){ item.buf=null; }
     item.thumb=await makeThumb(f); renderFiles();
   }
 }
@@ -628,6 +630,7 @@ function renderFiles(){
 const stamp=()=>{ const d=new Date(); return d.getFullYear()+pad2(d.getMonth()+1)+pad2(d.getDate())+'_'+pad2(d.getHours())+pad2(d.getMinutes())+pad2(d.getSeconds()); };
 $('#camPhoto').onchange=e=>{ addFiles([...e.target.files].map(f=>new File([f],'photo_'+stamp()+'.'+(f.name.split('.').pop()||'jpg'),{type:f.type}))); e.target.value=''; };
 $('#camVideo').onchange=e=>{ addFiles([...e.target.files].map(f=>new File([f],'video_'+stamp()+'.'+(f.name.split('.').pop()||'mp4'),{type:f.type}))); e.target.value=''; };
+const live={ folderId:null, key:null, done:new Set(), meta:null };
 const cam={ stream:null, rec:null, chunks:[], facing:'environment', timer:null, t0:0 };
 $('#btnPhoto').onclick=()=>{ if(IS_MOBILE || !navigator.mediaDevices?.getUserMedia) $('#camPhoto').click(); else openCam('photo'); };
 $('#btnVideo').onclick=()=>{ if(IS_MOBILE || !navigator.mediaDevices?.getUserMedia) $('#camVideo').click(); else openCam('video'); };
@@ -726,7 +729,18 @@ function validate(){
 /* ── Submit ── */
 const setStatus=(s,label)=>{ const p=$('#status'); p.className='pill '+s; p.textContent=label; };
 const setProgress=p=>{ const pr=$('#progress'); pr.style.display=p==null?'none':'block'; pr.querySelector('i').style.width=(p||0)+'%'; };
-const readB64 = f => new Promise((res,rej)=>{ const r=new FileReader(); r.onload=()=>res(r.result.split(',')[1]); r.onerror=rej; r.readAsDataURL(f); });
+const bufToB64 = buf => { const u=new Uint8Array(buf); let s=''; for(let i=0;i<u.length;i+=0x8000) s+=String.fromCharCode.apply(null,u.subarray(i,i+0x8000)); return btoa(s); };
+const readBytes = blob => new Promise((res,rej)=>{ const r=new FileReader(); r.onload=()=>res(r.result); r.onerror=()=>rej(r.error||new Error('read error')); r.readAsArrayBuffer(blob); });
+// read a blob (or slice) to base64; verifies the byte count and retries — iOS Safari sometimes returns empty/short reads for camera files
+async function readB64(blob, expected){
+  expected = expected ?? blob.size; let last='';
+  for(let t=1;t<=3;t++){
+    try{ const buf=await readBytes(blob); if(buf.byteLength===expected && expected>0){ return bufToB64(buf); } last=`got ${buf.byteLength} of ${expected} bytes`; }
+    catch(e){ last=e.message||String(e); }
+    await new Promise(r=>setTimeout(r,400*t));
+  }
+  throw new Error('อ่านไฟล์ไม่ได้ ('+last+') — iOS อาจลบไฟล์ชั่วคราวจากกล้องไปแล้ว กรุณาลบไฟล์นี้ออกแล้วเพิ่มใหม่');
+}
 
 $('#btnSubmit').onclick=async()=>{
   const errs=validate(), eb=$('#errbox');
@@ -752,28 +766,35 @@ $('#btnSubmit').onclick=async()=>{
       rec.files=plan.map((p,i)=>Object.assign(rec.files[i],{driveName:p.name}));
       const totalBytes=plan.reduce((a,p)=>a+p.f.size,0)||1; let sent=0;
       const prog=(label)=>{ setProgress(5+Math.round(88*sent/totalBytes)); $('#btnSubmit').innerHTML='<svg viewBox="0 0 24 24"><path d="M12 16V8m0 0-4 4m4-4 4 4"/><path d="M20.4 17.5A5 5 0 0 0 18 8h-1.3A8 8 0 1 0 4 15.3"/></svg>'+esc(label); };
-      // 1) folder
-      prog('Creating folder…');
-      const c=await post({ action:'create', parentFolderId:parent, record:Object.assign({},rec,{files:rec.files.map(f=>({slot:f.slotTitle,name:f.driveName,size:f.size}))}) });
+      // 1) folder — reuse the one from a failed attempt of this same form (avoids INV_xxx-2 duplicates)
+      const key=[rec.taxId,rec.invoice,rec.invDate].join('|'); let c;
+      if(live.folderId && live.key===key){ c=live.meta; prog('Resuming upload…'); }
+      else { prog('Creating folder…'); c=await post({ action:'create', parentFolderId:parent, record:Object.assign({},rec,{files:rec.files.map(f=>({slot:f.slotTitle,name:f.driveName,size:f.size}))}) }); live.folderId=c.folderId; live.key=key; live.meta=c; live.done=new Set(); }
       rec.driveUrl=c.folderUrl; rec.driveId=c.folderId; rec.folderName=c.folderName||rec.folderName; rec.drivePath=c.drivePath?('TESR shop tracking and handover / '+c.drivePath):rec.drivePath;
       // 2) files — small ones in one request, big ones in 4MB chunks (Drive resumable upload)
       const DIRECT_MAX=15*1024*1024, CHUNK=4*1024*1024;
       for(let i=0;i<plan.length;i++){
         const {f,name}=plan[i], mime=f.type||'application/octet-stream', lbl=`Uploading ${i+1}/${plan.length} · ${f.name}`;
-        if(f.size<=DIRECT_MAX){ prog(lbl); await post({ action:'upload', folderId:c.folderId, name, mime, data:await readB64(f.file) }); sent+=f.size; prog(lbl); }
+        if(live.done.has(name)){ sent+=f.size; prog(lbl); continue; }
+        if(f.size<=DIRECT_MAX){ prog(lbl); const data=await readB64(part(f,0,f.size),f.size); await post({ action:'upload', folderId:c.folderId, name, mime, data, size:f.size }); sent+=f.size; prog(lbl); }
         else {
           const s=await post({ action:'begin', folderId:c.folderId, name, mime, size:f.size });
-          for(let start=0; start<f.size; start+=CHUNK){
+          let done=false;
+          for(let start=0; start<f.size && !done; start+=CHUNK){
             const end=Math.min(start+CHUNK,f.size)-1;
             prog(`${lbl} ${Math.round(start/f.size*100)}%`);
-            const r=await post({ action:'chunk', sessionUri:s.sessionUri, start, end, total:f.size, data:await readB64(f.file.slice(start,end+1)) });
-            sent+=end-start+1; if(r.done) break;
+            const data=await readB64(part(f,start,end+1),end-start+1);
+            const r=await post({ action:'chunk', sessionUri:s.sessionUri, start, end, total:f.size, data });
+            sent+=end-start+1; done=!!r.done;
           }
+          if(!done) throw new Error('Drive ไม่ยืนยันว่ารับไฟล์ '+f.name+' ครบ — ลองกด Submit อีกครั้ง');
         }
+        live.done.add(name);
       }
       // 3) log
       prog('Saving log…');
       await post({ action:'finish', folderId:c.folderId, fileCount:plan.length, drivePath:c.drivePath||'', record:Object.assign({},rec,{files:undefined}) });
+      live.folderId=null; live.key=null; live.done=new Set();
       $('#btnSubmit').innerHTML='<svg viewBox="0 0 24 24"><path d="M12 16V8m0 0-4 4m4-4 4 4"/><path d="M20.4 17.5A5 5 0 0 0 18 8h-1.3A8 8 0 1 0 4 15.3"/></svg>Submit & Save to Google Drive'; setProgress(95);
     } else {
       for(let p=10;p<=90;p+=16){ await new Promise(r=>setTimeout(r,180)); setProgress(p); }
@@ -788,13 +809,13 @@ $('#btnSubmit').onclick=async()=>{
     currentRecord=rec; setProgress(100); setStatus('saved','Saved'); $('#resultLink').value=rec.driveUrl; $('#shareRow').style.display='flex'; $('#btnOpen').href=rec.driveUrl; $('#btnNew').style.display='';
     updateCounts(); toast(settings.mode==='live'?'บันทึกลง Google Drive เรียบร้อย':'Demo: บันทึกเรียบร้อย (ลิงก์ตัวอย่าง)');
     setTimeout(()=>setProgress(null),800); $('#formCard').querySelectorAll('input,select,textarea,button.rm,#btnPick').forEach(e=>e.disabled=true);
-  }catch(err){ console.error(err); $('#btnSubmit').innerHTML='<svg viewBox="0 0 24 24"><path d="M12 16V8m0 0-4 4m4-4 4 4"/><path d="M20.4 17.5A5 5 0 0 0 18 8h-1.3A8 8 0 1 0 4 15.3"/></svg>Submit & Save to Google Drive'; setStatus('error','Error'); setProgress(null); eb.style.display='block'; eb.innerHTML='<b>บันทึกไม่สำเร็จ:</b> '+esc(err.message)+'<br>ตรวจสอบ Web App URL, สิทธิ์ Deploy (Anyone), การเชื่อมต่ออินเทอร์เน็ต — และถ้าเพิ่งวางโค้ด backend ใหม่ ให้กด Run ▶ authorize ใน Apps Script แล้ว Deploy → New version'; $('#btnSubmit').disabled=false; }
+  }catch(err){ console.error(err); $('#btnSubmit').innerHTML='<svg viewBox="0 0 24 24"><path d="M12 16V8m0 0-4 4m4-4 4 4"/><path d="M20.4 17.5A5 5 0 0 0 18 8h-1.3A8 8 0 1 0 4 15.3"/></svg>Submit & Save to Google Drive'; setStatus('error','Error'); setProgress(null); eb.style.display='block'; eb.innerHTML='<b>บันทึกไม่สำเร็จ:</b> '+esc(err.message)+'<br>ตรวจสอบ Web App URL, สิทธิ์ Deploy (Anyone), การเชื่อมต่ออินเทอร์เน็ต — กด Submit อีกครั้งได้เลย ระบบจะอัปโหลดต่อจากไฟล์ที่ค้างโดยไม่สร้างโฟลเดอร์ซ้ำ'; $('#btnSubmit').disabled=false; }
 };
 $('#btnCopy').onclick=()=>{ if($('#resultLink').value) copy($('#resultLink').value,'คัดลอกลิงก์แล้ว'); };
 $('#btnMsg').onclick=()=>{ if(currentRecord) copy(fillMsg(currentRecord),'คัดลอกข้อความสำหรับลูกค้าแล้ว'); };
 function resetForm(){
   $('#formCard').querySelectorAll('input,select,textarea,button').forEach(e=>{ e.disabled=false; if(e.tagName!=='BUTTON' && e.type!=='file') e.value=''; });
-  files.all=[]; renderFiles(); $('#noteCount').textContent='0'; $('#invDate').value=toDMY(new Date()); updateFolderPreview(); $('#taxHelp').textContent='ค้นหาจาก Customer Database (1,242 ลูกค้า) — พิมพ์เลขผู้เสียภาษี หรือพิมพ์ชื่อบริษัทในช่องด้านล่างก็ได้'; $('#taxHelp').style.color='';
+  files.all=[]; renderFiles(); live.folderId=null; live.key=null; live.done=new Set(); $('#noteCount').textContent='0'; $('#invDate').value=toDMY(new Date()); updateFolderPreview(); $('#taxHelp').textContent='ค้นหาจาก Customer Database (1,242 ลูกค้า) — พิมพ์เลขผู้เสียภาษี หรือพิมพ์ชื่อบริษัทในช่องด้านล่างก็ได้'; $('#taxHelp').style.color='';
   $$('.input.err').forEach(e=>e.classList.remove('err')); $('#errbox').style.display='none';
   setStatus('draft','Draft'); ['#sumId','#sumCust','#sumBy','#sumAt','#sumFolder'].forEach(s=>$(s).textContent='-'); $('#resultLink').value=''; $('#shareRow').style.display='none'; $('#btnNew').style.display='none'; $('#btnSubmit').disabled=false; currentRecord=null; setProgress(null);
 }
