@@ -740,14 +740,41 @@ $('#btnSubmit').onclick=async()=>{
   $('#sumId').textContent=id; $('#sumFolder').textContent=rec.folderName; $('#sumBy').textContent=rec.createdBy; $('#sumAt').textContent=fmtDate(now);
   try{
     if(settings.mode==='live'){
-      const payload={ record:Object.assign({},rec,{files:rec.files.map(f=>({slot:f.slotTitle,name:f.name,size:f.size}))}), parentFolderId:settings.folder||DEFAULT_SETTINGS.folder, files:[] };
-      const all=files.all.map(f=>({slot:f.tag||'Evidence',f})); let i=0;
-      for(const {slot,f} of all){ payload.files.push({ slot, name:f.name, mime:f.type||'application/octet-stream', data:await readB64(f.file) }); setProgress(5+Math.round(45*(++i/all.length))); }
-      setProgress(55);
-      const res=await fetch(settings.endpoint,{ method:'POST', headers:{'Content-Type':'text/plain;charset=utf-8'}, body:JSON.stringify(payload) });
-      const txt=await res.text(); let j; try{ j=JSON.parse(txt); }catch(e){ throw new Error('Web App ตอบกลับไม่ใช่ JSON (HTTP '+res.status+') — มักเกิดจาก URL ผิด หรือ Deploy ยังไม่ได้ตั้ง "Who has access: Anyone"'); }
-      if(!j.ok) throw new Error(j.error||'Apps Script returned an error');
-      rec.driveUrl=j.folderUrl; rec.driveId=j.folderId||''; setProgress(95);
+      const ep=settings.endpoint, parent=settings.folder||DEFAULT_SETTINGS.folder;
+      const post=async(body,tries=3)=>{ for(let t=1;;t++){ try{
+          const res=await fetch(ep,{ method:'POST', headers:{'Content-Type':'text/plain;charset=utf-8'}, body:JSON.stringify(body) });
+          const txt=await res.text(); let j; try{ j=JSON.parse(txt); }catch(e){ throw new Error('Web App ตอบกลับไม่ใช่ JSON (HTTP '+res.status+') — ตรวจ URL / "Who has access: Anyone" / กด New version'); }
+          if(!j.ok) throw new Error(j.error||'Apps Script error'); return j;
+        }catch(err){ if(t>=tries||/ไม่ใช่ JSON|unknown action|required/.test(err.message)) throw err; await new Promise(r=>setTimeout(r,1200*t)); } } };
+      // final file names: "01 Pre-test Photo - IMG.jpg" / "09 Evidence - IMG.jpg"
+      const order=['Pre-test Photo','Test Video','Inside Box Photo','Packaging Photo','Other']; const cnt={};
+      const plan=files.all.map(f=>{ const tag=f.tag||'Evidence'; cnt[tag]=(cnt[tag]||0)+1; const i=order.indexOf(tag); return { f, name:String(i<0?9:i+1).padStart(2,'0')+' '+tag+(cnt[tag]>1?' ('+cnt[tag]+')':'')+' - '+f.name }; });
+      rec.files=plan.map((p,i)=>Object.assign(rec.files[i],{driveName:p.name}));
+      const totalBytes=plan.reduce((a,p)=>a+p.f.size,0)||1; let sent=0;
+      const prog=(label)=>{ setProgress(5+Math.round(88*sent/totalBytes)); $('#btnSubmit').innerHTML='<svg viewBox="0 0 24 24"><path d="M12 16V8m0 0-4 4m4-4 4 4"/><path d="M20.4 17.5A5 5 0 0 0 18 8h-1.3A8 8 0 1 0 4 15.3"/></svg>'+esc(label); };
+      // 1) folder
+      prog('Creating folder…');
+      const c=await post({ action:'create', parentFolderId:parent, record:Object.assign({},rec,{files:rec.files.map(f=>({slot:f.slotTitle,name:f.driveName,size:f.size}))}) });
+      rec.driveUrl=c.folderUrl; rec.driveId=c.folderId; rec.folderName=c.folderName||rec.folderName; rec.drivePath=c.drivePath?('TESR shop tracking and handover / '+c.drivePath):rec.drivePath;
+      // 2) files — small ones in one request, big ones in 4MB chunks (Drive resumable upload)
+      const DIRECT_MAX=15*1024*1024, CHUNK=4*1024*1024;
+      for(let i=0;i<plan.length;i++){
+        const {f,name}=plan[i], mime=f.type||'application/octet-stream', lbl=`Uploading ${i+1}/${plan.length} · ${f.name}`;
+        if(f.size<=DIRECT_MAX){ prog(lbl); await post({ action:'upload', folderId:c.folderId, name, mime, data:await readB64(f.file) }); sent+=f.size; prog(lbl); }
+        else {
+          const s=await post({ action:'begin', folderId:c.folderId, name, mime, size:f.size });
+          for(let start=0; start<f.size; start+=CHUNK){
+            const end=Math.min(start+CHUNK,f.size)-1;
+            prog(`${lbl} ${Math.round(start/f.size*100)}%`);
+            const r=await post({ action:'chunk', sessionUri:s.sessionUri, start, end, total:f.size, data:await readB64(f.file.slice(start,end+1)) });
+            sent+=end-start+1; if(r.done) break;
+          }
+        }
+      }
+      // 3) log
+      prog('Saving log…');
+      await post({ action:'finish', folderId:c.folderId, fileCount:plan.length, drivePath:c.drivePath||'', record:Object.assign({},rec,{files:undefined}) });
+      $('#btnSubmit').innerHTML='<svg viewBox="0 0 24 24"><path d="M12 16V8m0 0-4 4m4-4 4 4"/><path d="M20.4 17.5A5 5 0 0 0 18 8h-1.3A8 8 0 1 0 4 15.3"/></svg>Submit & Save to Google Drive'; setProgress(95);
     } else {
       for(let p=10;p<=90;p+=16){ await new Promise(r=>setTimeout(r,180)); setProgress(p); }
       rec.driveId='DEMO'+id.replace(/\W/g,'')+Math.random().toString(36).slice(2,8).toUpperCase();
@@ -761,7 +788,7 @@ $('#btnSubmit').onclick=async()=>{
     currentRecord=rec; setProgress(100); setStatus('saved','Saved'); $('#resultLink').value=rec.driveUrl; $('#shareRow').style.display='flex'; $('#btnOpen').href=rec.driveUrl; $('#btnNew').style.display='';
     updateCounts(); toast(settings.mode==='live'?'บันทึกลง Google Drive เรียบร้อย':'Demo: บันทึกเรียบร้อย (ลิงก์ตัวอย่าง)');
     setTimeout(()=>setProgress(null),800); $('#formCard').querySelectorAll('input,select,textarea,button.rm,#btnPick').forEach(e=>e.disabled=true);
-  }catch(err){ console.error(err); setStatus('error','Error'); setProgress(null); eb.style.display='block'; eb.innerHTML='<b>บันทึกไม่สำเร็จ:</b> '+esc(err.message)+'<br>ตรวจสอบ Web App URL, สิทธิ์ Deploy (Anyone) และการเชื่อมต่ออินเทอร์เน็ต'; $('#btnSubmit').disabled=false; }
+  }catch(err){ console.error(err); $('#btnSubmit').innerHTML='<svg viewBox="0 0 24 24"><path d="M12 16V8m0 0-4 4m4-4 4 4"/><path d="M20.4 17.5A5 5 0 0 0 18 8h-1.3A8 8 0 1 0 4 15.3"/></svg>Submit & Save to Google Drive'; setStatus('error','Error'); setProgress(null); eb.style.display='block'; eb.innerHTML='<b>บันทึกไม่สำเร็จ:</b> '+esc(err.message)+'<br>ตรวจสอบ Web App URL, สิทธิ์ Deploy (Anyone), การเชื่อมต่ออินเทอร์เน็ต — และถ้าเพิ่งวางโค้ด backend ใหม่ ให้กด Run ▶ authorize ใน Apps Script แล้ว Deploy → New version'; $('#btnSubmit').disabled=false; }
 };
 $('#btnCopy').onclick=()=>{ if($('#resultLink').value) copy($('#resultLink').value,'คัดลอกลิงก์แล้ว'); };
 $('#btnMsg').onclick=()=>{ if(currentRecord) copy(fillMsg(currentRecord),'คัดลอกข้อความสำหรับลูกค้าแล้ว'); };
