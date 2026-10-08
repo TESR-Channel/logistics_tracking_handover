@@ -1,91 +1,139 @@
 /**
- * TESR — Tracking & Handover backend (Google Apps Script)
- * ------------------------------------------------------
- * รับข้อมูลจาก tesr-tracking-handover.html แล้ว:
- *   1. สร้างโฟลเดอร์  TESR shop tracking and handover / <ปี> / <Tax ID ลูกค้า> / <Invoice>_<DDMMYYYY>
- *      เช่น  TESR shop tracking and handover/2026/1234567891234/INV00001_01082026
- *   2. อัปโหลดไฟล์หลักฐานทุกไฟล์ (ตั้งชื่อไฟล์ตามช่อง เช่น "01 Pre-test Photo - xxx.jpg")
- *   3. เขียน README.txt สรุปข้อมูลการส่งมอบไว้ในโฟลเดอร์
- *   4. ตั้งสิทธิ์โฟลเดอร์เป็น Anyone with the link → Viewer
- *   5. บันทึก log ลง Google Sheet (สร้างให้อัตโนมัติถ้ายังไม่มี)
- *   6. ส่งกลับ { ok:true, folderUrl, folderId }
+ * TESR — Tracking & Handover backend (Google Apps Script)  v2.2 — chunked upload, resumable retry, no 50MB limit
+ * ---------------------------------------------------------------------------
+ * โครงสร้างโฟลเดอร์:  TESR shop tracking and handover / <ปี> / <Tax ID> / <Invoice>_<DDMMYYYY>
  *
- * วิธี Deploy
- *   1. https://script.google.com → New project → วางโค้ดนี้ทั้งหมด
- *   2. (ถ้าต้องการ) แก้ค่า CONFIG ด้านล่าง
- *   3. Deploy → New deployment → Type: Web app
- *        Execute as: Me   ·   Who has access: Anyone
- *   4. Copy URL ที่ลงท้ายด้วย /exec → วางใน Settings ของหน้าเว็บ → เลือก Live mode
+ * v2 เปลี่ยนจากส่งทุกไฟล์ใน request เดียว (ติด limit 50MB ของ Apps Script → "Load failed" บนมือถือ)
+ * เป็นส่งทีละไฟล์ และไฟล์ใหญ่ (วิดีโอ) ส่งเป็นชิ้นละ 4MB ผ่าน Drive resumable upload
  *
- * หมายเหตุ: หน้าเว็บส่ง POST แบบ text/plain เพื่อเลี่ยง CORS preflight — ห้ามเปลี่ยน
+ * actions ที่หน้าเว็บเรียก (POST, JSON):
+ *   create  {record, parentFolderId}                 → สร้างโฟลเดอร์ + README + ตั้ง Public   → {ok, folderId, folderUrl, folderName}
+ *   upload  {folderId, name, mime, data(base64)}      → ไฟล์เล็ก (≤ 15MB) อัปโหลดตรง             → {ok, fileId}
+ *   begin   {folderId, name, mime, size}              → เปิด resumable session สำหรับไฟล์ใหญ่     → {ok, sessionUri}
+ *   chunk   {sessionUri, start, end, total, data}     → ส่งชิ้นถัดไป (ขนาดต้องหาร 256KB ลงตัว ยกเว้นชิ้นสุดท้าย) → {ok, done, fileId?}
+ *   finish  {folderId, record, fileCount}             → เขียน log ลง Google Sheet                → {ok}
+ *
+ * วิธี Deploy / อัปเดต
+ *   1. วางโค้ดนี้ทับของเดิมทั้งหมด → Save
+ *   2. **สำคัญ**: กด Run ▶ ที่ฟังก์ชัน `authorize` หนึ่งครั้ง แล้วกด Allow — v2 ต้องขอสิทธิ์เพิ่ม (เรียก Drive API ผ่าน UrlFetch)
+ *   3. Deploy → Manage deployments → ✎ → Version: New version → Deploy   (URL เดิม ไม่ต้องเปลี่ยนในหน้าเว็บ)
  */
 
 const CONFIG = {
-  ROOT_FOLDER_ID:   '1j7zETooR7NAMihHJJ2ZNOzD29-bdexXV', // "TESR shop tracking and handover" (ใช้เมื่อหน้าเว็บไม่ได้ส่ง parentFolderId)
-  LOG_SHEET_NAME:   'TESR Handover Log',       // ชื่อ Google Sheet สำหรับ log
-  MAKE_PUBLIC:      true,                      // false = แชร์เฉพาะคนในองค์กร
+  ROOT_FOLDER_ID: '1j7zETooR7NAMihHJJ2ZNOzD29-bdexXV', // "TESR shop tracking and handover"
+  LOG_SHEET_NAME: 'TESR Handover Log',
+  MAKE_PUBLIC:    true,
 };
+
+/** กด Run ที่ฟังก์ชันนี้หนึ่งครั้งหลังวางโค้ด เพื่อให้ Google ขอสิทธิ์ Drive + UrlFetch */
+function authorize() {
+  DriveApp.getRootFolder().getName();
+  SpreadsheetApp.getActiveSpreadsheet;
+  UrlFetchApp.fetch('https://www.googleapis.com/drive/v3/about?fields=user', { headers: { Authorization: 'Bearer ' + ScriptApp.getOAuthToken() }, muteHttpExceptions: true });
+  Logger.log('authorized OK');
+}
+
+function doGet() {
+  return json_({ ok: true, service: 'TESR Handover backend v2.2', time: new Date().toISOString() });
+}
 
 function doPost(e) {
   try {
-    const body = JSON.parse(e.postData.contents);
-    const r = body.record || {};
-    if (!r.id || !r.company) throw new Error('record.id / record.company is required');
-
-    // 1) Folder structure
-    //    Root → year → Tax ID → INVxxxxx_DDMMYYYY
-    const root = DriveApp.getFolderById(body.parentFolderId || CONFIG.ROOT_FOLDER_ID);
-    const year = String(r.invDate || r.createdAt || new Date().toISOString()).slice(0, 4);
-    const yearFolder = getOrCreateFolder_(root, year);
-    const customerFolder = getOrCreateFolder_(yearFolder, safeName_(r.taxId || 'unknown'));
-    const baseName = safeName_(r.folderName || ((r.invoice || 'INV') + '_' + ddmmyyyy_(r.invDate)));
-    // ถ้ามีโฟลเดอร์ชื่อซ้ำ (ส่งซ้ำ / แก้ไข) ให้ต่อท้ายด้วย -2, -3 ...
-    let name = baseName, n = 1;
-    while (customerFolder.getFoldersByName(name).hasNext()) name = baseName + '-' + (++n);
-    const folder = customerFolder.createFolder(name);
-
-    // 2) Files
-    const counters = {};
-    (body.files || []).forEach(function (f) {
-      const idx = slotIndex_(f.slot);
-      counters[f.slot] = (counters[f.slot] || 0) + 1;
-      const name = idx + ' ' + f.slot + (counters[f.slot] > 1 ? ' (' + counters[f.slot] + ')' : '') + ' - ' + f.name;
-      const blob = Utilities.newBlob(Utilities.base64Decode(f.data), f.mime || 'application/octet-stream', name);
-      folder.createFile(blob);
-    });
-
-    // 3) README
-    const readme = [
-      'TESR Co., Ltd. — Handover Record',
-      '=================================',
-      'Record ID       : ' + r.id,
-      'Customer        : ' + r.company + ' (Tax ID ' + (r.taxId || '-') + ')',
-      'Contact         : ' + (r.contact || '-') + ' ' + (r.phone || ''),
-      'Invoice/Receipt : ' + (r.invoice || '-') + '  (' + (r.invDateDisplay || r.invDate || '-') + ')',
-      'Tracking Link   : ' + (r.trackLink || '-'),
-      'Drive path      : ' + year + '/' + (r.taxId || '-') + '/' + name,
-      'Created         : ' + (r.createdAt || new Date().toISOString()) + ' by ' + (r.createdBy || '-'),
-      '',
-      'Files:',
-    ].concat((r.files || []).map(function (f) { return ' - [' + f.slot + '] ' + f.name; }))
-     .concat(['', 'Notes:', r.notes || '-', '', 'Robot · AI · IoT · Automation — Real-world Solutions'])
-     .join('\n');
-    folder.createFile('README.txt', readme, MimeType.PLAIN_TEXT);
-
-    // 4) Sharing
-    if (CONFIG.MAKE_PUBLIC) folder.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
-
-    // 5) Log sheet
-    logToSheet_(r, folder, (body.files || []).length);
-
-    return json_({ ok: true, folderUrl: folder.getUrl(), folderId: folder.getId() });
+    const b = JSON.parse(e.postData.contents);
+    switch (b.action) {
+      case 'create': return json_(create_(b));
+      case 'upload': return json_(upload_(b));
+      case 'begin':  return json_(begin_(b));
+      case 'chunk':  return json_(chunk_(b));
+      case 'finish': return json_(finish_(b));
+      default: throw new Error('unknown action "' + b.action + '" — หน้าเว็บอาจเป็นเวอร์ชันเก่า');
+    }
   } catch (err) {
     return json_({ ok: false, error: String(err && err.message || err) });
   }
 }
 
-function doGet() {
-  return json_({ ok: true, service: 'TESR Handover backend', time: new Date().toISOString() });
+/* ── actions ─────────────────────────────────────────────── */
+function create_(b) {
+  const r = b.record || {};
+  if (!r.id || !r.taxId) throw new Error('record.id / record.taxId is required');
+  const root = DriveApp.getFolderById(b.parentFolderId || CONFIG.ROOT_FOLDER_ID);
+  const year = String(r.invDate || r.createdAt || new Date().toISOString()).slice(0, 4);
+  const customerFolder = getOrCreateFolder_(getOrCreateFolder_(root, year), safeName_(r.taxId));
+  const base = safeName_(r.folderName || ((r.invoice || 'INV') + '_' + ddmmyyyy_(r.invDate)));
+  let name = base, n = 1;
+  while (customerFolder.getFoldersByName(name).hasNext()) name = base + '-' + (++n);
+  const folder = customerFolder.createFolder(name);
+
+  const readme = [
+    'TESR Co., Ltd. — Handover Record', '=================================',
+    'Record ID       : ' + r.id,
+    'Customer        : ' + (r.company || '-') + ' (Tax ID ' + r.taxId + ')',
+    'Contact         : ' + (r.contact || '-') + ' ' + (r.phone || ''),
+    'Invoice/Receipt : ' + (r.invoice || '-') + '  (' + (r.invDateDisplay || r.invDate || '-') + ')',
+    'Tracking Link   : ' + (r.trackLink || '-'),
+    'Drive path      : ' + year + '/' + r.taxId + '/' + name,
+    'Created         : ' + (r.createdAt || new Date().toISOString()) + ' by ' + (r.createdBy || '-'),
+    '', 'Files:'].concat((r.files || []).map(function (f) { return ' - ' + f.name; }))
+    .concat(['', 'Notes:', r.notes || '-', '', 'Robot · AI · IoT · Automation — Real-world Solutions']).join('\n');
+  folder.createFile('README.txt', readme, MimeType.PLAIN_TEXT);
+  if (CONFIG.MAKE_PUBLIC) folder.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
+  return { ok: true, folderId: folder.getId(), folderUrl: folder.getUrl(), folderName: name, drivePath: year + '/' + r.taxId + '/' + name };
+}
+
+function upload_(b) {
+  const folder = DriveApp.getFolderById(b.folderId);
+  const bytes = decode_(b.data, 'upload ' + b.name);
+  if (b.size && bytes.length !== b.size) throw new Error('upload ' + b.name + ': received ' + bytes.length + ' of ' + b.size + ' bytes — ส่งซ้ำอีกครั้ง');
+  // ถ้าชื่อซ้ำ (retry) ให้ลบของเก่าก่อน
+  const old = folder.getFilesByName(b.name); while (old.hasNext()) old.next().setTrashed(true);
+  const f = folder.createFile(Utilities.newBlob(bytes, b.mime || 'application/octet-stream', b.name));
+  return { ok: true, fileId: f.getId() };
+}
+
+/** base64 → bytes พร้อมข้อความ error ที่บอกได้ว่าอะไรผิด (แทน "Could not decode string.") */
+function decode_(data, ctx) {
+  if (typeof data !== 'string' || !data.length) throw new Error(ctx + ': ไม่มีข้อมูลไฟล์ในคำขอ (data ว่าง) — หน้าเว็บอ่านไฟล์ไม่สำเร็จ ลองลบไฟล์แล้วเพิ่มใหม่');
+  const clean = data.replace(/^data:[^,]*,/, '').replace(/\s/g, '');
+  try { return Utilities.base64Decode(clean); }
+  catch (e) { throw new Error(ctx + ': base64 เสียหาย (' + clean.length + ' chars) — ลองส่งอีกครั้ง'); }
+}
+
+function begin_(b) {
+  const res = UrlFetchApp.fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable&supportsAllDrives=true', {
+    method: 'post',
+    contentType: 'application/json; charset=UTF-8',
+    headers: { Authorization: 'Bearer ' + ScriptApp.getOAuthToken(), 'X-Upload-Content-Type': b.mime || 'application/octet-stream', 'X-Upload-Content-Length': String(b.size) },
+    payload: JSON.stringify({ name: b.name, parents: [b.folderId] }),
+    muteHttpExceptions: true,
+  });
+  if (res.getResponseCode() !== 200) throw new Error('begin failed: HTTP ' + res.getResponseCode() + ' ' + res.getContentText().slice(0, 200));
+  const uri = res.getAllHeaders()['Location'] || res.getAllHeaders()['location'];
+  if (!uri) throw new Error('no session URI returned');
+  return { ok: true, sessionUri: uri };
+}
+
+function chunk_(b) {
+  const bytes = decode_(b.data, 'chunk ' + b.start + '-' + b.end);
+  if (bytes.length !== (b.end - b.start + 1)) throw new Error('chunk ' + b.start + '-' + b.end + ': received ' + bytes.length + ' bytes — ส่งซ้ำอีกครั้ง');
+  const res = UrlFetchApp.fetch(b.sessionUri, {
+    method: 'put',
+    contentType: 'application/octet-stream',
+    headers: { 'Content-Range': 'bytes ' + b.start + '-' + b.end + '/' + b.total },
+    payload: bytes,
+    muteHttpExceptions: true,
+  });
+  const code = res.getResponseCode();
+  if (code === 308) return { ok: true, done: false };
+  if (code === 200 || code === 201) { const j = JSON.parse(res.getContentText() || '{}'); return { ok: true, done: true, fileId: j.id }; }
+  throw new Error('chunk failed: HTTP ' + code + ' ' + res.getContentText().slice(0, 200));
+}
+
+function finish_(b) {
+  const r = b.record || {};
+  const folder = DriveApp.getFolderById(b.folderId);
+  logToSheet_(r, folder, b.fileCount || 0, b.drivePath || '');
+  return { ok: true };
 }
 
 /* ── helpers ─────────────────────────────────────────────── */
@@ -99,12 +147,7 @@ function ddmmyyyy_(iso) {
   const p = function (n) { return String(n).padStart(2, '0'); };
   return p(d.getDate()) + p(d.getMonth() + 1) + d.getFullYear();
 }
-function slotIndex_(slot) {
-  const order = ['Pre-test Photo', 'Test Video', 'Inside Box Photo', 'Packaging Photo', 'Other'];
-  const i = order.indexOf(slot);
-  return String(i < 0 ? 9 : i + 1).padStart(2, '0');   // unlabeled files → 09 Evidence - name
-}
-function logToSheet_(r, folder, fileCount) {
+function logToSheet_(r, folder, fileCount, drivePath) {
   const props = PropertiesService.getScriptProperties();
   let id = props.getProperty('LOG_SHEET_ID'), ss;
   try { ss = id ? SpreadsheetApp.openById(id) : null; } catch (e) { ss = null; }
@@ -114,6 +157,6 @@ function logToSheet_(r, folder, fileCount) {
     ss.getActiveSheet().appendRow(['Timestamp', 'Record ID', 'Tax ID', 'Company', 'Contact', 'Phone', 'Invoice', 'Invoice Date', 'Tracking Link', 'Files', 'Created By', 'Drive Path', 'Drive Folder', 'Notes']);
     ss.getActiveSheet().setFrozenRows(1);
   }
-  ss.getActiveSheet().appendRow([new Date(), r.id, r.taxId, r.company, r.contact, r.phone, r.invoice, r.invDateDisplay || r.invDate, r.trackLink, fileCount, r.createdBy, folder.getParents().next().getParents().next().getName() + '/' + r.taxId + '/' + folder.getName(), folder.getUrl(), r.notes]);
+  ss.getActiveSheet().appendRow([new Date(), r.id, r.taxId, r.company, r.contact, r.phone, r.invoice, r.invDateDisplay || r.invDate, r.trackLink, fileCount, r.createdBy, drivePath, folder.getUrl(), r.notes]);
 }
 function json_(o) { return ContentService.createTextOutput(JSON.stringify(o)).setMimeType(ContentService.MimeType.JSON); }
