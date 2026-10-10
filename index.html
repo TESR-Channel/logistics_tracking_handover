@@ -480,7 +480,7 @@ code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;back
           </div>
           <div class="field"><label for="setEndpoint">Apps Script Web App URL</label><input class="input" id="setEndpoint" placeholder="https://script.google.com/macros/s/…/exec"><div class="help">Deploy ไฟล์ <code>tesr-drive-backend.gs</code> เป็น Web App (Execute as: Me · Access: Anyone) แล้ววาง URL ที่นี่</div>
             <div style="display:flex;gap:8px;align-items:center;margin-top:4px"><button class="btn btn-ghost btn-sm" id="btnTestEp">Test connection</button><span id="epStatus" style="font-size:12.5px;color:var(--muted)"></span></div></div>
-          <div class="field"><label for="setFolder">Root folder ID <span>(TESR shop tracking and handover)</span></label><input class="input" id="setFolder" placeholder="1j7zETooR7NAMihHJJ2ZNOzD29-bdexXV"><div class="help">โครงสร้าง: Root → ปี (2026) → Tax ID ลูกค้า → INV00001_DDMMYYYY</div></div>
+          <div class="field"><label for="setFolder">Root folder ID <span>(TESR shop tracking and handover)</span></label><input class="input" id="setFolder" placeholder="1PuUBsXmCo0mnQDcdvDqbDwtH_Qiv_Hni" readonly><div class="help">ล็อกตายตัวที่ "TESR shop tracking and handover" → ปี (2026, 2027, …) → Tax ID → INVxxxxx_DDMMYYYY — backend เป็นผู้กำหนด แก้ได้ใน Apps Script เท่านั้น</div></div>
         </div>
       </div>
       <div class="card">
@@ -523,7 +523,7 @@ code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;back
 /* ═══════════════════════════════════════════════════════════
    TESR Tracking & Handover — app logic
    ═══════════════════════════════════════════════════════════ */
-const APP_VERSION='v2.4';
+const APP_VERSION='v2.5';
 const $ = s => document.querySelector(s);
 const $$ = s => [...document.querySelectorAll(s)];
 
@@ -544,7 +544,7 @@ const store = {
 /* ── State ── */
 let records = [], customers = [], settings = {};
 const DEFAULT_SETTINGS = {
-  mode:'demo', endpoint:'', folder:'1j7zETooR7NAMihHJJ2ZNOzD29-bdexXV', user:'', prefix:'TESR-HO',
+  mode:'demo', endpoint:'', folder:'1PuUBsXmCo0mnQDcdvDqbDwtH_Qiv_Hni', user:'', prefix:'TESR-HO',
   msg:'เรียนคุณลูกค้า {company}\nTESR ได้จัดส่งสินค้าตามใบเสร็จ {invoice} เรียบร้อยแล้ว\nติดตามพัสดุ: {tracklink}\nหลักฐานการทดสอบและแพ็คสินค้า: {drive}\n\nขอบคุณที่ไว้วางใจ TESR\nTESR Co., Ltd. — Robot · AI · IoT · Automation'
 };
 /* Built-in customer database — imported from FlowAccount contact export (ลูกค้าที่มีเลขผู้เสียภาษี 13 หลัก) */
@@ -941,6 +941,7 @@ $('#btnWipe').onclick=async()=>{ if(!confirm('ลบข้อมูลราย�
 (async()=>{
   buildSlots();
   settings=Object.assign({},DEFAULT_SETTINGS,await store.get('settings',{}));
+  if(settings.folder!==DEFAULT_SETTINGS.folder){ settings.folder=DEFAULT_SETTINGS.folder; await store.set('settings',settings); } // v2.5: root ล็อกตายตัว ล้างค่าเก่าที่ค้างทุกเครื่อง
   records=await store.get('records',[]);
   const overrides=await store.get('customers_override',{}); const deleted=await store.get('customers_deleted',[]);
   customers=SEED_CUSTOMERS.filter(c=>!deleted.includes(c.taxId)).map(c=>Object.assign({},c,overrides[c.taxId]||{}));

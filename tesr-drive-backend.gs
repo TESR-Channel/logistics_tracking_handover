@@ -1,5 +1,5 @@
 /**
- * TESR — Tracking & Handover backend (Google Apps Script)  v2.2 — chunked upload, resumable retry, no 50MB limit
+ * TESR — Tracking & Handover backend (Google Apps Script)  v2.5 — root โฟลเดอร์ล็อกตายตัว (ไม่รับค่าจาก client), chunked upload, no 50MB limit
  * ---------------------------------------------------------------------------
  * โครงสร้างโฟลเดอร์:  TESR shop tracking and handover / <ปี> / <Tax ID> / <Invoice>_<DDMMYYYY>
  *
@@ -7,7 +7,7 @@
  * เป็นส่งทีละไฟล์ และไฟล์ใหญ่ (วิดีโอ) ส่งเป็นชิ้นละ 4MB ผ่าน Drive resumable upload
  *
  * actions ที่หน้าเว็บเรียก (POST, JSON):
- *   create  {record, parentFolderId}                 → สร้างโฟลเดอร์ + README + ตั้ง Public   → {ok, folderId, folderUrl, folderName}
+ *   create  {record}                                  → สร้างโฟลเดอร์ root/ปี/TaxID/Invoice_วันที่ + README + Public → {ok, folderId, folderUrl}
  *   upload  {folderId, name, mime, data(base64)}      → ไฟล์เล็ก (≤ 15MB) อัปโหลดตรง             → {ok, fileId}
  *   begin   {folderId, name, mime, size}              → เปิด resumable session สำหรับไฟล์ใหญ่     → {ok, sessionUri}
  *   chunk   {sessionUri, start, end, total, data}     → ส่งชิ้นถัดไป (ขนาดต้องหาร 256KB ลงตัว ยกเว้นชิ้นสุดท้าย) → {ok, done, fileId?}
@@ -20,7 +20,7 @@
  */
 
 const CONFIG = {
-  ROOT_FOLDER_ID: '1j7zETooR7NAMihHJJ2ZNOzD29-bdexXV', // "TESR shop tracking and handover"
+  ROOT_FOLDER_ID: '1PuUBsXmCo0mnQDcdvDqbDwtH_Qiv_Hni', // "TESR shop tracking and handover" (ยืนยัน 10/10/2026)
   LOG_SHEET_NAME: 'TESR Handover Log',
   MAKE_PUBLIC:    true,
 };
@@ -34,7 +34,7 @@ function authorize() {
 }
 
 function doGet() {
-  return json_({ ok: true, service: 'TESR Handover backend v2.2', time: new Date().toISOString() });
+  return json_({ ok: true, service: 'TESR Handover backend v2.5', time: new Date().toISOString(), root: (function(){ try { return DriveApp.getFolderById(CONFIG.ROOT_FOLDER_ID).getName(); } catch (e) { return 'ERROR: เปิด root ไม่ได้'; } })() });
 }
 
 function doPost(e) {
@@ -57,7 +57,11 @@ function doPost(e) {
 function create_(b) {
   const r = b.record || {};
   if (!r.id || !r.taxId) throw new Error('record.id / record.taxId is required');
-  const root = DriveApp.getFolderById(b.parentFolderId || CONFIG.ROOT_FOLDER_ID);
+  // v2.5: root ล็อกตายตัวที่ CONFIG.ROOT_FOLDER_ID เท่านั้น — ไม่รับค่าจากหน้าเว็บอีก
+  // (เคยมีเครื่องที่ Settings ค้างค่า root เก่า ทำให้ record ไปลงผิดที่)
+  var root;
+  try { root = DriveApp.getFolderById(CONFIG.ROOT_FOLDER_ID); root.getName(); }
+  catch (e) { throw new Error('เปิดโฟลเดอร์ root (' + CONFIG.ROOT_FOLDER_ID + ') ไม่ได้ — ตรวจ CONFIG.ROOT_FOLDER_ID ใน Apps Script'); }
   const year = String(r.invDate || r.createdAt || new Date().toISOString()).slice(0, 4);
   const customerFolder = getOrCreateFolder_(getOrCreateFolder_(root, year), safeName_(r.taxId));
   const base = safeName_(r.folderName || ((r.invoice || 'INV') + '_' + ddmmyyyy_(r.invDate)));
