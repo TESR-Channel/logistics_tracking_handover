@@ -1,5 +1,5 @@
 /**
- * TESR — Tracking & Handover backend (Google Apps Script)  v2.5 — root โฟลเดอร์ล็อกตายตัว (ไม่รับค่าจาก client), chunked upload, no 50MB limit
+ * TESR — Tracking & Handover backend (Google Apps Script)  v2.6 — รองรับลูกค้าบุคคลธรรมดา (โฟลเดอร์ = ชื่อ+เบอร์), root ล็อกตายตัว, chunked upload
  * ---------------------------------------------------------------------------
  * โครงสร้างโฟลเดอร์:  TESR shop tracking and handover / <ปี> / <Tax ID> / <Invoice>_<DDMMYYYY>
  *
@@ -34,7 +34,7 @@ function authorize() {
 }
 
 function doGet() {
-  return json_({ ok: true, service: 'TESR Handover backend v2.5', time: new Date().toISOString(), root: (function(){ try { return DriveApp.getFolderById(CONFIG.ROOT_FOLDER_ID).getName(); } catch (e) { return 'ERROR: เปิด root ไม่ได้'; } })() });
+  return json_({ ok: true, service: 'TESR Handover backend v2.6', time: new Date().toISOString(), root: (function(){ try { return DriveApp.getFolderById(CONFIG.ROOT_FOLDER_ID).getName(); } catch (e) { return 'ERROR: เปิด root ไม่ได้'; } })() });
 }
 
 function doPost(e) {
@@ -56,14 +56,15 @@ function doPost(e) {
 /* ── actions ─────────────────────────────────────────────── */
 function create_(b) {
   const r = b.record || {};
-  if (!r.id || !r.taxId) throw new Error('record.id / record.taxId is required');
+  if (!r.id || !(r.folderKey || r.taxId)) throw new Error('record.id / customer key is required');
   // v2.5: root ล็อกตายตัวที่ CONFIG.ROOT_FOLDER_ID เท่านั้น — ไม่รับค่าจากหน้าเว็บอีก
   // (เคยมีเครื่องที่ Settings ค้างค่า root เก่า ทำให้ record ไปลงผิดที่)
   var root;
   try { root = DriveApp.getFolderById(CONFIG.ROOT_FOLDER_ID); root.getName(); }
   catch (e) { throw new Error('เปิดโฟลเดอร์ root (' + CONFIG.ROOT_FOLDER_ID + ') ไม่ได้ — ตรวจ CONFIG.ROOT_FOLDER_ID ใน Apps Script'); }
   const year = String(r.invDate || r.createdAt || new Date().toISOString()).slice(0, 4);
-  const customerFolder = getOrCreateFolder_(getOrCreateFolder_(root, year), safeName_(r.taxId));
+  const custKey = safeName_(r.folderKey || r.taxId);  // นิติบุคคล = Tax ID, บุคคลธรรมดา = ชื่อ + เบอร์โทร
+  const customerFolder = getOrCreateFolder_(getOrCreateFolder_(root, year), custKey);
   const base = safeName_(r.folderName || ((r.invoice || 'INV') + '_' + ddmmyyyy_(r.invDate)));
   let name = base, n = 1;
   while (customerFolder.getFoldersByName(name).hasNext()) name = base + '-' + (++n);
@@ -72,17 +73,18 @@ function create_(b) {
   const readme = [
     'TESR Co., Ltd. — Handover Record', '=================================',
     'Record ID       : ' + r.id,
-    'Customer        : ' + (r.company || '-') + ' (Tax ID ' + r.taxId + ')',
+    'Customer        : ' + (r.company || '-') + (r.custType === 'P' ? ' (บุคคลธรรมดา)' : ' (Tax ID ' + (r.taxId || '-') + ')'),
     'Contact         : ' + (r.contact || '-') + ' ' + (r.phone || ''),
+    'Address         : ' + (r.address || '-'),
     'Invoice/Receipt : ' + (r.invoice || '-') + '  (' + (r.invDateDisplay || r.invDate || '-') + ')',
     'Tracking Link   : ' + (r.trackLink || '-'),
-    'Drive path      : ' + year + '/' + r.taxId + '/' + name,
+    'Drive path      : ' + year + '/' + custKey + '/' + name,
     'Created         : ' + (r.createdAt || new Date().toISOString()) + ' by ' + (r.createdBy || '-'),
     '', 'Files:'].concat((r.files || []).map(function (f) { return ' - ' + f.name; }))
     .concat(['', 'Notes:', r.notes || '-', '', 'Robot · AI · IoT · Automation — Real-world Solutions']).join('\n');
   folder.createFile('README.txt', readme, MimeType.PLAIN_TEXT);
   if (CONFIG.MAKE_PUBLIC) folder.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
-  return { ok: true, folderId: folder.getId(), folderUrl: folder.getUrl(), folderName: name, drivePath: year + '/' + r.taxId + '/' + name };
+  return { ok: true, folderId: folder.getId(), folderUrl: folder.getUrl(), folderName: name, drivePath: year + '/' + custKey + '/' + name };
 }
 
 function upload_(b) {
@@ -158,9 +160,9 @@ function logToSheet_(r, folder, fileCount, drivePath) {
   if (!ss) {
     ss = SpreadsheetApp.create(CONFIG.LOG_SHEET_NAME);
     props.setProperty('LOG_SHEET_ID', ss.getId());
-    ss.getActiveSheet().appendRow(['Timestamp', 'Record ID', 'Tax ID', 'Company', 'Contact', 'Phone', 'Invoice', 'Invoice Date', 'Tracking Link', 'Files', 'Created By', 'Drive Path', 'Drive Folder', 'Notes']);
+    ss.getActiveSheet().appendRow(['Timestamp', 'Record ID', 'Tax ID', 'Company', 'Contact', 'Phone', 'Invoice', 'Invoice Date', 'Tracking Link', 'Files', 'Created By', 'Drive Path', 'Drive Folder', 'Notes', 'Customer Type', 'Address']);
     ss.getActiveSheet().setFrozenRows(1);
   }
-  ss.getActiveSheet().appendRow([new Date(), r.id, r.taxId, r.company, r.contact, r.phone, r.invoice, r.invDateDisplay || r.invDate, r.trackLink, fileCount, r.createdBy, drivePath, folder.getUrl(), r.notes]);
+  ss.getActiveSheet().appendRow([new Date(), r.id, r.taxId, r.company, r.contact, r.phone, r.invoice, r.invDateDisplay || r.invDate, r.trackLink, fileCount, r.createdBy, drivePath, folder.getUrl(), r.notes, r.custType === 'P' ? 'บุคคลธรรมดา' : 'นิติบุคคล', r.address || '']);
 }
 function json_(o) { return ContentService.createTextOutput(JSON.stringify(o)).setMimeType(ContentService.MimeType.JSON); }

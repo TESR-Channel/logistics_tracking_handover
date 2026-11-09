@@ -304,6 +304,11 @@ code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;back
     <div class="card" id="formCard">
       <div class="sec">
         <div class="sec-h"><span class="n">1</span><h3>Customer Information</h3></div>
+        <div class="mode" style="margin-bottom:16px">
+          <label><input type="radio" name="ctype" value="J" checked><div><b>นิติบุคคล (บริษัท / หจก.)</b><span>มีเลขผู้เสียภาษี 13 หลัก — กรอกแบบเดิม</span></div></label>
+          <label><input type="radio" name="ctype" value="P"><div><b>บุคคลธรรมดา</b><span>กรอกชื่อ เบอร์โทร ที่อยู่ — ไม่ต้องใช้เลขผู้เสียภาษี</span></div></label>
+        </div>
+        <div id="jFields">
         <div class="field" style="position:relative">
           <label for="taxId">Tax ID <span>(เลขประจำตัวผู้เสียภาษี)</span></label>
           <div class="input-row">
@@ -321,6 +326,18 @@ code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;back
         <div class="grid2">
           <div class="field"><label for="contact">Contact Person <span>(ผู้ติดต่อ)</span></label><input class="input" id="contact" placeholder="Name"></div>
           <div class="field"><label for="phone">Phone / LINE <span>(เบอร์ติดต่อ)</span></label><input class="input" id="phone" placeholder="08x-xxx-xxxx"></div>
+        </div>
+        </div>
+        <div id="pFields" style="display:none">
+          <div class="field" style="position:relative">
+            <label for="pName">Customer Name <span>(ชื่อ-นามสกุลลูกค้า)</span></label>
+            <input class="input" id="pName" placeholder="เช่น สมชาย ใจดี — พิมพ์ชื่อหรือเบอร์เพื่อค้นหาลูกค้าเดิม" autocomplete="off">
+            <div class="autofill-list" id="autofillP"></div>
+          </div>
+          <div class="grid2">
+            <div class="field"><label for="pPhone">Phone / LINE <span>(เบอร์โทร)</span></label><input class="input" id="pPhone" inputmode="tel" placeholder="08x-xxx-xxxx"></div>
+          </div>
+          <div class="field"><label for="pAddr">Address <span>(ที่อยู่จัดส่ง — ไม่บังคับ)</span></label><textarea class="input" id="pAddr" style="min-height:70px" placeholder="บ้านเลขที่ ถนน ตำบล อำเภอ จังหวัด รหัสไปรษณีย์"></textarea></div>
         </div>
       </div>
 
@@ -523,7 +540,7 @@ code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;back
 /* ═══════════════════════════════════════════════════════════
    TESR Tracking & Handover — app logic
    ═══════════════════════════════════════════════════════════ */
-const APP_VERSION='v2.5';
+const APP_VERSION='v2.6';
 const $ = s => document.querySelector(s);
 const $$ = s => [...document.querySelectorAll(s)];
 
@@ -580,7 +597,7 @@ const toISO = d => d.getFullYear()+'-'+pad2(d.getMonth()+1)+'-'+pad2(d.getDate()
 const invDateObj = () => parseDMY($('#invDate').value) || new Date();
 const ddmmyyyy = () => { const x=invDateObj(); return pad2(x.getDate())+pad2(x.getMonth()+1)+x.getFullYear(); };
 const folderName = () => ($('#invoice').value.trim().replace(/[\\\/:*?"<>|\s]/g,'')||'INV00001')+'_'+ddmmyyyy();
-const drivePath = () => `TESR shop tracking and handover / ${invDateObj().getFullYear()} / ${$('#taxId').value||'<TaxID>'} / ${folderName()}`;
+const drivePath = () => `TESR shop tracking and handover / ${invDateObj().getFullYear()} / ${custKey()} / ${folderName()}`;
 const totalFiles = () => files.all.length;
 const part = (f,start,end) => f.buf ? new Blob([f.buf.slice(start,end)]) : f.file.slice(start,end);
 const fillMsg = r => (settings.msg||DEFAULT_SETTINGS.msg).replace(/\{(\w+)\}/g,(_,k)=>({company:r.company,invoice:r.invoice,tracklink:r.trackLink||'-',drive:r.driveUrl||'-'})[k]??'');
@@ -687,6 +704,25 @@ $('#filelist').addEventListener('click',e=>{ const b=e.target.closest('.rm'); if
 
 /* ── Customer autofill ── */
 const findCust = t => customers.find(c=>c.taxId===t);
+const phoneDigits = s => (s||'').replace(/\D/g,'');
+const custType = () => (document.querySelector('input[name=ctype]:checked')||{value:'J'}).value;
+const isPKey = k => String(k||'').startsWith('P:');
+const custKey = () => custType()==='P'
+  ? (($('#pName').value.trim()||'<ชื่อลูกค้า>')+(phoneDigits($('#pPhone').value)?' '+phoneDigits($('#pPhone').value):''))
+  : ($('#taxId').value||'<TaxID>');
+function setCustType(v){ const r=document.querySelector('input[name=ctype][value="'+v+'"]'); if(r) r.checked=true; applyCustType(); }
+function applyCustType(){ const p=custType()==='P';
+  $('#jFields').style.display=p?'none':''; $('#pFields').style.display=p?'':'none';
+  $$('.input.err').forEach(e=>e.classList.remove('err'));
+  $('#sumCust').textContent=(p?$('#pName').value:$('#company').value).trim()||'-'; updateFolderPreview(); }
+$$('input[name=ctype]').forEach(r=>r.addEventListener('change',applyCustType));
+$('#pName').addEventListener('input',()=>{ $('#sumCust').textContent=$('#pName').value||'-'; updateFolderPreview();
+  const v=$('#pName').value.trim().toLowerCase(), box=$('#autofillP'); if(v.length<2){ box.style.display='none'; return; }
+  const m=customers.filter(c=>isPKey(c.taxId)&&((c.company||'').toLowerCase().includes(v)||(c.phone||'').includes(v))).slice(0,8);
+  box.innerHTML=m.map(c=>`<div data-id="${c.taxId}"><b>${esc(c.phone||'')}</b>${esc(c.company)}</div>`).join(''); box.style.display=m.length?'block':'none'; });
+$('#autofillP').addEventListener('mousedown',e=>{ const d=e.target.closest('div[data-id]'); if(d){ const c=findCust(d.dataset.id); $('#pName').value=c.company; $('#pPhone').value=c.phone||''; $('#pAddr').value=c.address||''; $('#sumCust').textContent=c.company; updateFolderPreview(); $('#autofillP').style.display='none'; }});
+$('#pPhone').addEventListener('input',()=>updateFolderPreview());
+document.addEventListener('click',e=>{ if(!e.target.closest('#pName')) $('#autofillP').style.display='none'; });
 function applyCust(c){ $('#company').value=c.company; $('#contact').value=c.contact||''; $('#phone').value=c.phone||c.email||''; updateFolderPreview(); $('#sumCust').textContent=c.company; $('#taxHelp').textContent='พบข้อมูลลูกค้าใน Customer Database — กรอกให้อัตโนมัติแล้ว'; $('#taxHelp').style.color='var(--ok)'; }
 function searchTax(){
   const t=$('#taxId').value.replace(/\D/g,''); $('#taxId').value=t; $('#autofill').style.display='none';
@@ -709,7 +745,7 @@ $('#autofill').addEventListener('mousedown',e=>{ const d=e.target.closest('div[d
 document.addEventListener('click',e=>{ if(!e.target.closest('#taxId')) $('#autofill').style.display='none'; });
 $('#company').addEventListener('input',()=>{ $('#sumCust').textContent=$('#company').value||'-';
   const v=$('#company').value.trim().toLowerCase(), box=$('#autofillCo'); if(v.length<2){ box.style.display='none'; return; }
-  const m=customers.filter(c=>c.company.toLowerCase().includes(v)).slice(0,8);
+  const m=customers.filter(c=>!isPKey(c.taxId)&&c.company.toLowerCase().includes(v)).slice(0,8);
   box.innerHTML=m.map(c=>`<div data-id="${c.taxId}"><b>${c.taxId}</b>${esc(c.company)}</div>`).join(''); box.style.display=m.length?'block':'none'; });
 $('#autofillCo').addEventListener('mousedown',e=>{ const d=e.target.closest('div[data-id]'); if(d){ $('#taxId').value=d.dataset.id; applyCust(findCust(d.dataset.id)); $('#taxHelp').textContent='พบข้อมูลลูกค้าใน Customer Database — กรอกให้อัตโนมัติแล้ว'; $('#taxHelp').style.color='var(--ok)'; $('#autofillCo').style.display='none'; }});
 document.addEventListener('click',e=>{ if(!e.target.closest('#company')) $('#autofillCo').style.display='none'; });
@@ -724,8 +760,13 @@ function validate(){
   const errs=[]; const t=$('#taxId').value;
   $$('.input.err').forEach(e=>e.classList.remove('err'));
   const bad=(id,m)=>{ errs.push(m); $(id).classList.add('err'); };
-  if(!/^\d{13}$/.test(t)) bad('#taxId','Tax ID ต้องเป็นตัวเลข 13 หลัก');
-  if(!$('#company').value.trim()) bad('#company','กรอกชื่อบริษัท');
+  if(custType()==='J'){
+    if(!/^\d{13}$/.test(t)) bad('#taxId','Tax ID ต้องเป็นตัวเลข 13 หลัก');
+    if(!$('#company').value.trim()) bad('#company','กรอกชื่อบริษัท');
+  } else {
+    if(!$('#pName').value.trim()) bad('#pName','กรอกชื่อลูกค้า');
+    if(phoneDigits($('#pPhone').value).length<9) bad('#pPhone','กรอกเบอร์โทรลูกค้า (อย่างน้อย 9 หลัก)');
+  }
   if(!$('#invoice').value.trim()) bad('#invoice','กรอกเลขที่ใบเสร็จ / ใบกำกับภาษี');
   if(!parseDMY($('#invDate').value)) bad('#invDate','วันที่ใบเสร็จต้องเป็น dd/mm/yyyy');
   const link=$('#trackLink').value.trim(); if(link && !/^https?:\/\/.+/.test(link)) bad('#trackLink','Tracking Link ต้องขึ้นต้นด้วย http:// หรือ https://');
@@ -755,7 +796,14 @@ $('#btnSubmit').onclick=async()=>{
   eb.style.display='none';
   if(totalFiles()===0 && !confirm('ยังไม่ได้แนบไฟล์หลักฐาน — บันทึกโดยไม่มีไฟล์หรือไม่?')) return;
   const id=nextId(), now=new Date().toISOString();
-  const rec={ id, taxId:$('#taxId').value, company:$('#company').value.trim(), contact:$('#contact').value.trim(), phone:$('#phone').value.trim(), invoice:$('#invoice').value.trim(), invDate:toISO(invDateObj()), invDateDisplay:$('#invDate').value, folderName:folderName(), drivePath:drivePath(), trackLink:$('#trackLink').value.trim(), notes:$('#notes').value, createdBy:settings.user||'-', createdAt:now, driveUrl:'', driveId:'', mode:settings.mode,
+  const P=custType()==='P';
+  const rec={ id, custType:custType(), folderKey:custKey(),
+    taxId: P ? 'P:'+phoneDigits($('#pPhone').value) : $('#taxId').value,
+    company: (P?$('#pName'):$('#company')).value.trim(),
+    contact: P ? '' : $('#contact').value.trim(),
+    phone: (P?$('#pPhone'):$('#phone')).value.trim(),
+    address: P ? $('#pAddr').value.trim() : '',
+    invoice:$('#invoice').value.trim(), invDate:toISO(invDateObj()), invDateDisplay:$('#invDate').value, folderName:folderName(), drivePath:drivePath(), trackLink:$('#trackLink').value.trim(), notes:$('#notes').value, createdBy:settings.user||'-', createdAt:now, driveUrl:'', driveId:'', mode:settings.mode,
     files:files.all.map(f=>({slot:f.tag||'Evidence',slotTitle:f.tag||'Evidence',name:f.name,size:f.size,type:f.type,thumb:f.thumb})) };
   $('#btnSubmit').disabled=true; setStatus('saving','Saving…'); setProgress(5);
   $('#sumId').textContent=id; $('#sumFolder').textContent=rec.folderName; $('#sumBy').textContent=rec.createdBy; $('#sumAt').textContent=fmtDate(now);
@@ -810,8 +858,8 @@ $('#btnSubmit').onclick=async()=>{
     }
     records.unshift(rec); await store.set('records',records);
     let c=findCust(rec.taxId);
-    if(!c){ customers.push({taxId:rec.taxId,company:rec.company,contact:rec.contact,phone:rec.phone,address:''}); customers.sort((a,b)=>a.company.localeCompare(b.company,'th')); }
-    else { if(rec.contact) c.contact=rec.contact; if(rec.phone) c.phone=rec.phone; }
+    if(!c){ customers.push({taxId:rec.taxId,company:rec.company,contact:rec.contact,phone:rec.phone,address:rec.address||'',type:rec.custType}); customers.sort((a,b)=>a.company.localeCompare(b.company,'th')); }
+    else { if(rec.contact) c.contact=rec.contact; if(rec.phone) c.phone=rec.phone; if(rec.address) c.address=rec.address; }
     await saveCustomers();
     currentRecord=rec; setProgress(100); setStatus('saved','Saved'); $('#resultLink').value=rec.driveUrl; $('#shareRow').style.display='flex'; $('#btnOpen').href=rec.driveUrl; $('#btnNew').style.display='';
     updateCounts(); toast(settings.mode==='live'?'บันทึกลง Google Drive เรียบร้อย':'Demo: บันทึกเรียบร้อย (ลิงก์ตัวอย่าง)');
@@ -821,10 +869,10 @@ $('#btnSubmit').onclick=async()=>{
 $('#btnCopy').onclick=()=>{ if($('#resultLink').value) copy($('#resultLink').value,'คัดลอกลิงก์แล้ว'); };
 $('#btnMsg').onclick=()=>{ if(currentRecord) copy(fillMsg(currentRecord),'คัดลอกข้อความสำหรับลูกค้าแล้ว'); };
 function resetForm(){
-  $('#formCard').querySelectorAll('input,select,textarea,button').forEach(e=>{ e.disabled=false; if(e.tagName!=='BUTTON' && e.type!=='file') e.value=''; });
+  $('#formCard').querySelectorAll('input,select,textarea,button').forEach(e=>{ e.disabled=false; if(e.tagName!=='BUTTON' && e.type!=='file' && e.type!=='radio' && e.type!=='checkbox') e.value=''; });
   files.all=[]; renderFiles(); live.folderId=null; live.key=null; live.done=new Set(); $('#noteCount').textContent='0'; $('#invDate').value=toDMY(new Date()); updateFolderPreview(); $('#taxHelp').textContent='ค้นหาจาก Customer Database (1,242 ลูกค้า) — พิมพ์เลขผู้เสียภาษี หรือพิมพ์ชื่อบริษัทในช่องด้านล่างก็ได้'; $('#taxHelp').style.color='';
   $$('.input.err').forEach(e=>e.classList.remove('err')); $('#errbox').style.display='none';
-  setStatus('draft','Draft'); ['#sumId','#sumCust','#sumBy','#sumAt','#sumFolder'].forEach(s=>$(s).textContent='-'); $('#resultLink').value=''; $('#shareRow').style.display='none'; $('#btnNew').style.display='none'; $('#btnSubmit').disabled=false; currentRecord=null; setProgress(null);
+  applyCustType(); setStatus('draft','Draft'); ['#sumId','#sumCust','#sumBy','#sumAt','#sumFolder'].forEach(s=>$(s).textContent='-'); $('#resultLink').value=''; $('#shareRow').style.display='none'; $('#btnNew').style.display='none'; $('#btnSubmit').disabled=false; currentRecord=null; setProgress(null);
 }
 $('#btnReset').onclick=()=>{ if(currentRecord||confirm('ล้างข้อมูลในฟอร์มทั้งหมด?')) resetForm(); };
 $('#btnNew').onclick=resetForm;
@@ -838,7 +886,7 @@ function renderList(){
   $('#listEmpty').style.display=rows.length?'none':''; $('#listTable').style.display=rows.length?'':'none';
   $('#listBody').innerHTML=rows.map(r=>`<tr>
     <td><span class="mono">${r.id}</span>${r.mode==='demo'?'<br><span class="chip" style="font-size:10.5px">demo</span>':''}</td>
-    <td><b>${esc(r.company)}</b><br><span style="color:var(--muted);font-size:12px">${r.taxId}</span></td>
+    <td><b>${esc(r.company)}</b><br><span style="color:var(--muted);font-size:12px">${r.custType==='P'?'บุคคลธรรมดา'+(r.phone?' · '+esc(r.phone):''):r.taxId}</span></td>
     <td>${esc(r.invoice)}</td>
     <td>${r.trackLink?`<a href="${esc(r.trackLink)}" target="_blank" rel="noopener" style="font-size:12.5px">${esc(r.trackLink.replace(/^https?:\/\//,'').slice(0,34))}…</a>`:'<span style="color:var(--faint)">-</span>'}</td>
     <td>${r.files.length}</td>
@@ -861,7 +909,7 @@ $('#listBody').addEventListener('click',async e=>{
 });
 function openRecord(r){
   $('#mTitle').textContent=r.id;
-  const kv=[['Customer',`${esc(r.company)}<br><span style="color:var(--muted)">${r.taxId}${r.contact?' · '+esc(r.contact):''}${r.phone?' · '+esc(r.phone):''}</span>`],['Invoice / Receipt',esc(r.invoice)+(r.invDateDisplay?' <span style="color:var(--muted)">· '+r.invDateDisplay+'</span>':'')],['Drive path',`<span class="mono">${esc(r.drivePath||'-')}</span>`],['Tracking link',r.trackLink?`<a href="${esc(r.trackLink)}" target="_blank" rel="noopener">${esc(r.trackLink)}</a>`:'-'],['Drive folder',`<a href="${esc(r.driveUrl)}" target="_blank" rel="noopener" style="color:var(--crimson)">${esc(r.driveUrl)}</a>`],['Created',`${fmtDate(r.createdAt)} · ${esc(r.createdBy)}`],['Notes',r.notes?esc(r.notes).replace(/\n/g,'<br>'):'-']];
+  const kv=[['Customer',`${esc(r.company)}<br><span style="color:var(--muted)">${r.custType==='P'?'บุคคลธรรมดา':r.taxId}${r.contact?' · '+esc(r.contact):''}${r.phone?' · '+esc(r.phone):''}${r.address?'<br>'+esc(r.address):''}</span>`],['Invoice / Receipt',esc(r.invoice)+(r.invDateDisplay?' <span style="color:var(--muted)">· '+r.invDateDisplay+'</span>':'')],['Drive path',`<span class="mono">${esc(r.drivePath||'-')}</span>`],['Tracking link',r.trackLink?`<a href="${esc(r.trackLink)}" target="_blank" rel="noopener">${esc(r.trackLink)}</a>`:'-'],['Drive folder',`<a href="${esc(r.driveUrl)}" target="_blank" rel="noopener" style="color:var(--crimson)">${esc(r.driveUrl)}</a>`],['Created',`${fmtDate(r.createdAt)} · ${esc(r.createdBy)}`],['Notes',r.notes?esc(r.notes).replace(/\n/g,'<br>'):'-']];
   $('#mBody').innerHTML=`<div class="detail">${kv.map(([k,v])=>`<div class="k">${k}</div><div>${v}</div>`).join('')}</div>
     <div style="margin-top:16px;font-weight:600">Evidence (${r.files.length})</div>
     <div class="thumbs">${r.files.map(f=>`<div class="th">${f.thumb?`<img src="${f.thumb}" alt="">`:`<div class="doc">${esc(f.name.split('.').pop().toUpperCase())}</div>`}<b>${esc(f.slotTitle)}</b><br>${esc(f.name)}</div>`).join('')||'<span style="color:var(--muted)">-</span>'}</div>
@@ -871,8 +919,8 @@ function openRecord(r){
 $('#mClose').onclick=()=>$('#modal').classList.remove('open'); $('#modal').addEventListener('click',e=>{ if(e.target.id==='modal') $('#modal').classList.remove('open'); });
 $('#btnExport').onclick=()=>{
   if(!records.length) return toast('ยังไม่มีข้อมูล');
-  const h=['Record ID','Tax ID','Company','Contact','Phone','Invoice','Invoice Date','Tracking Link','Files','Created By','Created At','Drive Path','Drive Link','Notes'];
-  const rows=records.map(r=>[r.id,r.taxId,r.company,r.contact,r.phone,r.invoice,r.invDateDisplay||r.invDate,r.trackLink,r.files.length,r.createdBy,fmtDate(r.createdAt),r.drivePath,r.driveUrl,r.notes].map(v=>'"'+String(v??'').replace(/"/g,'""')+'"').join(','));
+  const h=['Record ID','Customer Type','Tax ID','Company','Contact','Phone','Address','Invoice','Invoice Date','Tracking Link','Files','Created By','Created At','Drive Path','Drive Link','Notes'];
+  const rows=records.map(r=>[r.id,r.custType==='P'?'บุคคลธรรมดา':'นิติบุคคล',r.custType==='P'?'':r.taxId,r.company,r.contact,r.phone,r.address||'',r.invoice,r.invDateDisplay||r.invDate,r.trackLink,r.files.length,r.createdBy,fmtDate(r.createdAt),r.drivePath,r.driveUrl,r.notes].map(v=>'"'+String(v??'').replace(/"/g,'""')+'"').join(','));
   const blob=new Blob(['\ufeff'+[h.join(','),...rows].join('\n')],{type:'text/csv;charset=utf-8'}); const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download=`tesr-tracking-${new Date().toISOString().slice(0,10)}.csv`; a.click();
 };
 
@@ -883,7 +931,7 @@ function renderCust(){
   const rows=all.slice(0,150);
   $('#custEmpty').style.display=rows.length?'none':'';
   $('#custCount').textContent=`${all.length.toLocaleString()} customers${all.length>150?' — showing first 150, refine your search':''}`;
-  $('#custBody').innerHTML=rows.map(c=>`<tr><td class="mono">${c.taxId}${c.branch?'<br><span class="chip" style="font-size:10.5px">'+esc(c.branch)+'</span>':''}</td><td><b>${esc(c.company)}</b>${c.email?'<br><span style="color:var(--muted);font-size:12px">'+esc(c.email)+'</span>':''}</td><td>${esc(c.contact||'-')}</td><td>${esc(c.phone||'-')}</td><td style="font-size:12.5px;color:var(--muted);max-width:260px">${esc(c.address||'-')}</td><td>${records.filter(r=>r.taxId===c.taxId).length}</td>
+  $('#custBody').innerHTML=rows.map(c=>`<tr><td class="mono">${isPKey(c.taxId)?'<span class="chip">บุคคลธรรมดา</span>':c.taxId}${c.branch?'<br><span class="chip" style="font-size:10.5px">'+esc(c.branch)+'</span>':''}</td><td><b>${esc(c.company)}</b>${c.email?'<br><span style="color:var(--muted);font-size:12px">'+esc(c.email)+'</span>':''}</td><td>${esc(c.contact||'-')}</td><td>${esc(c.phone||'-')}</td><td style="font-size:12.5px;color:var(--muted);max-width:260px">${esc(c.address||'-')}</td><td>${records.filter(r=>r.taxId===c.taxId).length}</td>
     <td><div class="actions"><button class="iconbtn" data-act="use" data-id="${c.taxId}" title="New tracking for this customer"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg></button><button class="iconbtn" data-act="edit" data-id="${c.taxId}" title="Edit"><svg viewBox="0 0 24 24"><path d="M12 20h9M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></svg></button><button class="iconbtn danger" data-act="del" data-id="${c.taxId}" title="Delete"><svg viewBox="0 0 24 24"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/></svg></button></div></td></tr>`).join('');
 }
 $('#custSearch').oninput=renderCust;
@@ -908,7 +956,7 @@ $('#btnAddCust').onclick=()=>custForm();
 $('#custBody').addEventListener('click',async e=>{
   const b=e.target.closest('button[data-act]'); if(!b) return; const c=findCust(b.dataset.id); if(!c) return;
   if(b.dataset.act==='edit') custForm(c);
-  if(b.dataset.act==='use'){ resetForm(); $('#taxId').value=c.taxId; applyCust(c); show('new'); $('#invoice').focus(); }
+  if(b.dataset.act==='use'){ resetForm(); if(isPKey(c.taxId)){ setCustType('P'); $('#pName').value=c.company; $('#pPhone').value=c.phone||''; $('#pAddr').value=c.address||''; $('#sumCust').textContent=c.company; updateFolderPreview(); } else { setCustType('J'); $('#taxId').value=c.taxId; applyCust(c); } show('new'); $('#invoice').focus(); }
   if(b.dataset.act==='del' && confirm(`ลบลูกค้า ${c.company}?`)){ customers=customers.filter(x=>x!==c); await saveCustomers(); updateCounts(); renderCust(); }
 });
 
